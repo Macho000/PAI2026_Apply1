@@ -1,0 +1,7 @@
+# fetched by scripts/fetch_go2w_description.sh (BSD-3, ~30 MB of meshes)
+/third_party/unitree_ros/
+# training / evaluation outputs
+/logs/
+/outputs/
+/docker/.env
+/wandb/

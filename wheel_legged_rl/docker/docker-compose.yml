@@ -1,0 +1,50 @@
+# wheel_legged_rl 用 Isaac Lab v2.3.0 コンテナ（ur10-robotiq-grasp の docker-compose.yml を踏襲）
+#
+#   cd wheel_legged_rl/docker
+#   ./setup_host.sh                 # 初回のみ: キャッシュディレクトリ作成
+#   docker compose build
+#   docker compose up -d && docker compose exec isaac-lab-wl bash
+services:
+  isaac-lab-wl:
+    build:
+      context: .
+      args:
+        ISAACLAB_IMAGE: ${ISAACLAB_IMAGE:-nvcr.io/nvidia/isaac-lab:2.3.0}
+    image: wheel-legged-rl:isaaclab-2.3.0
+    container_name: isaac-lab-wl
+    stdin_open: true
+    tty: true
+    privileged: true
+    network_mode: host
+    ipc: host
+    working_dir: /quadra/wheel_legged_rl
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - ACCEPT_EULA=Y
+      - PRIVACY_CONSENT=Y
+      - DISPLAY=${DISPLAY}
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - WANDB_USERNAME=${WANDB_USERNAME:-}
+    volumes:
+      # quadra リポジトリ全体（git 情報を rsl_rl のログに残すため wheel_legged_rl だけでなくルートを渡す）
+      - ../..:/quadra
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro
+      - ${HOME}/.Xauthority:/root/.Xauthority
+      # Isaac Sim のキャッシュ（ur10-robotiq-grasp と同じホスト側ディレクトリ構成。Isaac Sim 版ごとに分ける）
+      - ${HOME}/docker/isaac-sim-5.1/cache/kit:/isaac-sim/kit/cache:rw
+      - ${HOME}/docker/isaac-sim-5.1/cache/ov:/root/.cache/ov:rw
+      - ${HOME}/docker/isaac-sim-5.1/cache/pip:/root/.cache/pip:rw
+      - ${HOME}/docker/isaac-sim-5.1/cache/glcache:/root/.cache/nvidia/GLCache:rw
+      - ${HOME}/docker/isaac-sim-5.1/cache/computecache:/root/.nv/ComputeCache:rw
+      - ${HOME}/docker/isaac-sim-5.1/cache/wheel_legged_rl:/root/.cache/wheel_legged_rl:rw
+      - ${HOME}/docker/isaac-sim-5.1/logs:/root/.nvidia-omniverse/logs:rw
+      - ${HOME}/docker/isaac-sim-5.1/data:/root/.local/share/ov/data:rw
+      - ${HOME}/docker/isaac-sim-5.1/documents:/root/Documents:rw

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wheel_legged_rl"
+version = "0.1.0"
+description = "Wheel-legged quadruped locomotion RL on Isaac Lab (Go2-W first, robot-agnostic core)"
+requires-python = ">=3.10"
+# Isaac Lab (isaaclab, isaaclab_rl, isaaclab_tasks) and rsl-rl-lib come with the Isaac Lab installation.
+dependencies = ["numpy", "pyyaml", "gymnasium"]
+
+[project.optional-dependencies]
+deploy = ["onnxruntime"]
+test = ["pytest", "torch", "onnx", "onnxruntime"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wheel_legged_rl*"]
+
+[tool.setuptools.package-data]
+wheel_legged_rl = ["configs/*/*.yaml"]

@@ -1,0 +1,174 @@
+# Phase 3 -- flat ground, 3-axis commands + high speed, sim-to-real domain randomisation, energy terms.
+#
+# Fine-tuned from the Phase 2 best checkpoint: Go2WPhase3PPORunnerCfg.init_from = "phase2_flat3axis" makes
+# train.py load <latest phase2_flat3axis run>/best.pt (made by evaluate.py --select_best). Override with
+# --init_from <file | run dir>, or train from scratch with agent.init_from=null.
+#
+# What changes against Phase 2 (plan section 12: "flat + friction randomisation, + high speed, energy / slip"):
+#   commands  vx limit +-1.0 -> +-2.0 m/s (curriculum from +-1.0); vy / yaw rate start at their Phase 2 limits
+#   rewards   + mech_power_legs, mech_power_wheels, joint_torques_legs, wheel_slip (base_height kept)
+#   DR        friction 0.3-1.2, base mass -1..+3 kg (was +-1), link masses x0.9-1.1, base inertia x0.8-1.2,
+#             base CoM +-3/2/2 cm, Kp / Kd x0.8-1.2, motor strength x0.8-1.2, joint friction (absolute),
+#             command delay 0-20 ms
+#   critic    + the randomised values (privileged, 90 dims; the actor observation is unchanged). The Phase 2 critic
+#             is expanded with zero weights for the new inputs, so V is unchanged at the start; the actor is frozen
+#             for a critic-only warm-up first (Go2WPhase3PPORunnerCfg.critic_warmup, agents/runner.py).
+#
+# Everything is switched on at once. If the run collapses early (Episode_Termination/*, Diagnostics/fall_rate),
+# narrow the ranges from the command line and widen them in a second run, e.g.
+#   env.events.motor_strength.params.strength_range=[0.9,1.1] env.events.actuator_gains=null
+# or edit a copy of this file (--env_config). A delay change must be made for all three actuator groups (the
+# ranges must stay equal; see events.sync_actuator_delay).
+# The critic's privileged terms stay (disabled randomisation reads as the nominal value). Warm-up settings:
+#   agent.critic_warmup.max_iterations=10, agent.critic_warmup=null (off)
+#
+# Every reward weight lives in this file. Reward terms that are not listed are disabled (weight 0, pruned).
+# Keys other than rewards / terrain / actuators / evaluation are attribute overrides on the env config
+# (envs/base_env_cfg.py). Hydra overrides from the command line are applied afterwards.
+
+episode_length_s: 20.0
+
+scene:
+  num_envs: 4096
+
+commands:
+  base_velocity:
+    resampling_time_range: [10.0, 10.0]
+    rel_standing_envs: 0.2 # 20 % of the envs are commanded to stand still
+    ranges: # vx grows from the Phase 2 limit; vy / yaw rate keep the Phase 2 distribution (no forgetting)
+      lin_vel_x: [-1.0, 1.0]
+      lin_vel_y: [-0.5, 0.5]
+      ang_vel_z: [-1.5, 1.5]
+    limit_ranges: # final range; also the joystick clamp written to deploy.yaml
+      lin_vel_x: [-2.0, 2.0] # wheel no-load speed 30.1 rad/s x 0.086 m = 2.6 m/s
+      lin_vel_y: [-0.5, 0.5]
+      ang_vel_z: [-1.5, 1.5]
+
+rewards:
+  track_lin_vel_xy: {weight: 1.5, params: {std: 0.5}}
+  track_ang_vel_z: {weight: 0.75, params: {std: 0.5}}
+  flat_orientation: -2.5
+  lin_vel_z: -2.0
+  ang_vel_xy: -0.05
+  termination: -10.0
+  stand_still: {weight: -0.5, params: {command_threshold: 0.0277}} # ||[vx, vy, wz]|| below 0.1 km/h
+  base_height: -30.0
+  action_rate: -0.01
+  joint_pos_limits_legs: -10.0
+  undesired_contacts: -1.0
+  # added in phase 3 (plan section 9). Initial weights: each ~1-3 % of the tracking reward at 1 m/s
+  # (Phase 2 best: ~100 J/m -> ~100 W). Raise them once tracking at 2 m/s is stable.
+  mech_power_legs: -2.0e-4 # sum |tau * omega| [W] over the legs
+  mech_power_wheels: -1.0e-4 # [W]; wheels do the propulsion, so weaker than the legs
+  joint_torques_legs: -2.0e-5 # sum tau^2 [N^2 m^2]; ~400 at stance
+  wheel_slip: -0.1 # sum over wheels in contact of (v_long - omega r)^2 [m^2/s^2]
+
+terminations:
+  bad_orientation:
+    params: {limit_angle: 0.8}
+
+curriculum:
+  lin_vel_x_levels:
+    params:
+      threshold: 0.8
+      delta: 0.1 # 10 checks (one per episode length, ~42 iterations) from +-1.0 to +-2.0
+  lin_vel_y_levels: null # already at the limit
+  ang_vel_z_levels: null # already at the limit
+  terrain_levels: null
+
+terrain:
+  generator:
+    size: [8.0, 8.0]
+    border_width: 50.0 # 2 m/s x 20 s = 40 m: robots must not drive off the mesh
+    num_rows: 5
+    num_cols: 5
+    curriculum: false
+  max_init_terrain_level: 0
+  friction: {static: 1.0, dynamic: 1.0} # multiplied with the robot's randomised friction
+  sub_terrains:
+    flat: {type: flat, proportion: 1.0}
+
+observations:
+  policy:
+    terrain_height_scan:
+      noise: {n_min: -0.02, n_max: 0.02}
+
+# Command delay in physics steps (5 ms each; the policy runs every 4). Sampled once per episode and robot, shared
+# by every group (events.actuator_delay), so the three ranges must be equal.
+actuators:
+  hip_thigh: {min_delay: 0, max_delay: 4}
+  calf: {min_delay: 0, max_delay: 4}
+  wheel: {min_delay: 0, max_delay: 4}
+
+events:
+  physics_material: # sampled once per robot (64 buckets); friction = robot x ground (1.0)
+    params:
+      static_friction_range: [0.3, 1.2]
+      dynamic_friction_range: [0.3, 1.2]
+  add_base_mass: # payload / CAD error
+    params:
+      mass_distribution_params: [-1.0, 3.0]
+  link_mass:
+    params:
+      mass_distribution_params: [0.9, 1.1]
+  base_inertia:
+    params:
+      scale_range: [0.8, 1.2]
+  base_com: # [m], added to the URDF CoM of the base
+    params:
+      com_range: {x: [-0.03, 0.03], y: [-0.02, 0.02], z: [-0.02, 0.02]}
+  actuator_gains: # per motor, resampled every episode
+    params:
+      stiffness_distribution_params: [0.8, 1.2]
+      damping_distribution_params: [0.8, 1.2]
+  motor_strength: # per motor, resampled every episode
+    params:
+      strength_range: [0.8, 1.2]
+  joint_friction: # per motor, resampled every episode; ESTIMATE ranges (not published for the Go2-W)
+    params:
+      static_range: [0.0, 0.2] # Coulomb [N m]
+      viscous_range: [0.0, 0.02] # [N m s / rad]
+  push_robot:
+    interval_range_s: [10.0, 15.0]
+    params:
+      velocity_range: {x: [-0.5, 0.5], y: [-0.5, 0.5]}
+
+# Used by scripts/evaluate.py (not by the environment). The Play task keeps the randomisation (every robot of the
+# batch gets its own sample): the criteria are judged on randomised robots. For the nominal model add e.g.
+#   env.events.actuator_gains=null env.events.motor_strength=null env.events.actuator_delay=null ...
+# (with actuator_delay disabled every group samples its own 0-20 ms delay: set max_delay 0 in an --env_config copy)
+evaluation:
+  num_envs: 64
+  skip_s: 1.0 # seconds after each command change excluded from tracking errors
+  scenarios:
+    # phase 1 scenarios (forgetting check)
+    stand: [{command: [0.0, 0.0, 0.0], duration: 8.0}]
+    forward_1.0: [{command: [1.0, 0.0, 0.0], duration: 8.0}]
+    backward_1.0: [{command: [-1.0, 0.0, 0.0], duration: 8.0}]
+    go_stop: [{command: [1.0, 0.0, 0.0], duration: 4.0}, {command: [0.0, 0.0, 0.0], duration: 4.0}]
+    # phase 2 scenarios (forgetting check)
+    left_0.5: [{command: [0.0, 0.5, 0.0], duration: 8.0}]
+    right_0.5: [{command: [0.0, -0.5, 0.0], duration: 8.0}]
+    yaw_left_1.5: [{command: [0.0, 0.0, 1.5], duration: 8.0}]
+    yaw_right_1.5: [{command: [0.0, 0.0, -1.5], duration: 8.0}]
+    arc_0.5_0.8: [{command: [0.5, 0.0, 0.8], duration: 8.0}]
+    diagonal: [{command: [0.5, 0.3, 0.0], duration: 8.0}]
+    turn_stop: [{command: [0.0, 0.0, 1.0], duration: 4.0}, {command: [0.0, 0.0, 0.0], duration: 4.0}]
+    # phase 3: high speed
+    forward_2.0: [{command: [2.0, 0.0, 0.0], duration: 8.0}]
+    backward_2.0: [{command: [-2.0, 0.0, 0.0], duration: 8.0}]
+    go_stop_2.0: [{command: [2.0, 0.0, 0.0], duration: 4.0}, {command: [0.0, 0.0, 0.0], duration: 4.0}]
+    arc_1.5_1.0: [{command: [1.5, 0.0, 1.0], duration: 8.0}]
+  criteria: # phase completion (plan section 12: "attitude RMS while driving on wheels" + phase 2 criteria)
+    vel_rmse: {max: 0.15} # planar ||v_xy - cmd_xy||
+    yaw_rate_rmse: {max: 0.2}
+    fall_rate: {max: 0.01}
+    standstill_speed: {max: 0.05}
+    roll_pitch_rms: {max: 0.05} # [rad] ~2.9 deg; Phase 2 best: 0.024
+  selection_weights: # best checkpoint = argmin sum(weight * metric)
+    vel_rmse: 1.0
+    yaw_rate_rmse: 0.5
+    fall_rate: 10.0
+    standstill_speed: 1.0
+    roll_pitch_rms: 1.0
+    cost_of_transport: 0.05

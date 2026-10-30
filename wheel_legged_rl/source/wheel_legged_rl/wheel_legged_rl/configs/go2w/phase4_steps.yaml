@@ -1,0 +1,203 @@
+# Phase 4 -- flat ground + small steps (0 -> 0.15 m), terrain-level curriculum. Commands, rewards and the
+# domain randomisation are those of Phase 3 (unchanged sections are copies of phase3_flatcoord.yaml).
+#
+# Fine-tuned from the Phase 3 best checkpoint: Go2WPhase4PPORunnerCfg.init_from = "phase3_flatcoord" makes train.py
+# load <latest phase3_flatcoord run>/best.pt. Override with --init_from <file | run dir>.
+#
+# What changes against Phase 3 (plan section 12: "flat + small steps 0 -> 0.15 m", completion: step success > 80 %):
+#   terrain   10 difficulty rows x 20 columns: flat 20 % (forgetting), random grid 20 %, curbs up 30 %, curbs down 30 %
+#             (step height 0 -> 0.15 m over the rows); robots start on rows 0-3
+#   curricula terrain levels (curriculum.terrain_levels_tracking: up when the robot left its tile without falling,
+#             down when it fell or tracked the command poorly); vx starts at its +-2 m/s limit (no command curriculum)
+#   critic    unchanged inputs (the height scan was constant on flat ground); a short critic-only warm-up first
+#
+# Curbs = Isaac Lab's pyramid stairs with 1 m deep steps: from the 2 x 2 m tile centre, 3 curbs 1 m apart in every
+# direction (down for curbs_down, up for curbs_up). The wheel radius is 0.086 m: steps above ~r cannot be rolled
+# over, so the upper rows need the legs. Stairs (0.3 m deep) are Phase 5.
+episode_length_s: 20.0
+
+scene:
+  num_envs: 4096
+
+commands:
+  base_velocity:
+    resampling_time_range: [10.0, 10.0]
+    rel_standing_envs: 0.2 # 20 % of the envs are commanded to stand still
+    ranges: # the Phase 3 limits from the start
+      lin_vel_x: [-2.0, 2.0]
+      lin_vel_y: [-0.5, 0.5]
+      ang_vel_z: [-1.5, 1.5]
+    limit_ranges: # final range; also the joystick clamp written to deploy.yaml
+      lin_vel_x: [-2.0, 2.0] # wheel no-load speed 30.1 rad/s x 0.086 m = 2.6 m/s
+      lin_vel_y: [-0.5, 0.5]
+      ang_vel_z: [-1.5, 1.5]
+
+rewards:
+  track_lin_vel_xy: {weight: 1.5, params: {std: 0.5}}
+  track_ang_vel_z: {weight: 0.75, params: {std: 0.5}}
+  flat_orientation: -2.5
+  lin_vel_z: -2.0
+  ang_vel_xy: -0.05
+  termination: -10.0
+  stand_still: {weight: -0.5, params: {command_threshold: 0.0277}} # ||[vx, vy, wz]|| below 0.1 km/h
+  base_height: -30.0
+  action_rate: -0.01
+  joint_pos_limits_legs: -10.0
+  undesired_contacts: -1.0
+  # added in phase 3 (plan section 9)
+  mech_power_legs: -2.0e-4 # sum |tau * omega| [W] over the legs
+  mech_power_wheels: -1.0e-4 # [W]; wheels do the propulsion, so weaker than the legs
+  joint_torques_legs: -2.0e-5 # sum tau^2 [N^2 m^2]; ~400 at stance
+  wheel_slip: -0.1 # sum over wheels in contact of (v_long - omega r)^2 [m^2/s^2]
+
+terminations:
+  bad_orientation:
+    params: {limit_angle: 0.8}
+
+curriculum:
+  lin_vel_x_levels: null # already at the limit
+  terrain_levels:
+    params:
+      reward_term_name: track_lin_vel_xy
+      promote_distance: null # half the tile size (4 m): the robot left its tile
+      demote_tracking: 0.5 # episodic xy tracking reward < 50 % of its maximum
+
+terrain:
+  generator:
+    size: [8.0, 8.0]
+    border_width: 50.0 # 2 m/s x 20 s = 40 m from an edge tile
+    num_rows: 10 # difficulty levels
+    num_cols: 20 # 4 flat, 4 random grid, 6 curbs up, 6 curbs down
+    curriculum: true
+  max_init_terrain_level: 3
+  friction: {static: 1.0, dynamic: 1.0}
+  sub_terrains:
+    flat: {type: flat, proportion: 0.2}
+    random_grid: # 0.75 m cells at +-h; neighbouring cells differ by up to 2h = 0.15 m
+      type: random_grid
+      proportion: 0.2
+      grid_width: 0.75
+      grid_height_range: [0.0, 0.075]
+      platform_width: 2.0
+    curbs_up:
+      type: inv_pyramid_stairs
+      proportion: 0.3
+      step_height_range: [0.0, 0.15]
+      step_width: 1.0
+      platform_width: 3.0 # -> 3 steps and a 2 x 2 m centre
+    curbs_down:
+      type: pyramid_stairs
+      proportion: 0.3
+      step_height_range: [0.0, 0.15]
+      step_width: 1.0
+      platform_width: 3.0
+
+observations:
+  policy:
+    terrain_height_scan:
+      noise: {n_min: -0.02, n_max: 0.02}
+
+# Command delay in physics steps (5 ms each; the policy runs every 4). Sampled once per episode and robot, shared
+# by every group (events.actuator_delay), so the three ranges must be equal.
+actuators:
+  hip_thigh: {min_delay: 0, max_delay: 4}
+  calf: {min_delay: 0, max_delay: 4}
+  wheel: {min_delay: 0, max_delay: 4}
+
+events:
+  physics_material: # sampled once per robot (64 buckets); friction = robot x ground (1.0)
+    params:
+      static_friction_range: [0.3, 1.2]
+      dynamic_friction_range: [0.3, 1.2]
+  add_base_mass: # payload / CAD error
+    params:
+      mass_distribution_params: [-1.0, 3.0]
+  link_mass:
+    params:
+      mass_distribution_params: [0.9, 1.1]
+  base_inertia:
+    params:
+      scale_range: [0.8, 1.2]
+  base_com: # [m], added to the URDF CoM of the base
+    params:
+      com_range: {x: [-0.03, 0.03], y: [-0.02, 0.02], z: [-0.02, 0.02]}
+  actuator_gains: # per motor, resampled every episode
+    params:
+      stiffness_distribution_params: [0.8, 1.2]
+      damping_distribution_params: [0.8, 1.2]
+  motor_strength: # per motor, resampled every episode
+    params:
+      strength_range: [0.8, 1.2]
+  joint_friction: # per motor, resampled every episode; ESTIMATE ranges (not published for the Go2-W)
+    params:
+      static_range: [0.0, 0.2] # Coulomb [N m]
+      viscous_range: [0.0, 0.02] # [N m s / rad]
+  push_robot:
+    interval_range_s: [10.0, 15.0]
+    params:
+      velocity_range: {x: [-0.5, 0.5], y: [-0.5, 0.5]}
+
+# Used by scripts/evaluate.py. ``terrain`` replaces the training terrain for the evaluation: one row, fixed heights,
+# every sub-terrain in its own column(s). A scenario with ``terrain`` starts every robot at the centre of that tile
+# facing +x (the flat tile is 3 columns wide, so the flat scenarios stay on flat ground); ``goal_distance`` makes it a
+# traversal: success = no fall and a planar displacement >= goal_distance [m] (3.5 m = past the last curb, 3 m out).
+# ``group`` names the scenario group; criteria / selection weights ``<group>/<metric>`` use that group only.
+evaluation:
+  num_envs: 64
+  skip_s: 1.0
+  terrain:
+    generator:
+      size: [8.0, 8.0]
+      border_width: 50.0
+      num_rows: 1
+      num_cols: 9
+      curriculum: true # fixed column layout (curriculum.terrain_levels is off during the evaluation)
+      difficulty_range: [1.0, 1.0]
+    max_init_terrain_level: 0
+    friction: {static: 1.0, dynamic: 1.0}
+    sub_terrains:
+      flat: {type: flat, proportion: 3}
+      curbs_up_0.10: {type: inv_pyramid_stairs, proportion: 1, step_height_range: [0.10, 0.10], step_width: 1.0, platform_width: 3.0}
+      curbs_up_0.15: {type: inv_pyramid_stairs, proportion: 1, step_height_range: [0.15, 0.15], step_width: 1.0, platform_width: 3.0}
+      curbs_down_0.10: {type: pyramid_stairs, proportion: 1, step_height_range: [0.10, 0.10], step_width: 1.0, platform_width: 3.0}
+      curbs_down_0.15: {type: pyramid_stairs, proportion: 1, step_height_range: [0.15, 0.15], step_width: 1.0, platform_width: 3.0}
+      random_grid_0.075: {type: random_grid, proportion: 1, grid_width: 0.75, grid_height_range: [0.075, 0.075], platform_width: 2.0}
+  scenarios:
+    # phases 1-3 on flat ground (forgetting check)
+    stand: {terrain: flat, group: flat, segments: [{command: [0.0, 0.0, 0.0], duration: 8.0}]}
+    forward_1.0: {terrain: flat, group: flat, segments: [{command: [1.0, 0.0, 0.0], duration: 8.0}]}
+    backward_1.0: {terrain: flat, group: flat, segments: [{command: [-1.0, 0.0, 0.0], duration: 8.0}]}
+    go_stop: {terrain: flat, group: flat, segments: [{command: [1.0, 0.0, 0.0], duration: 4.0}, {command: [0.0, 0.0, 0.0], duration: 4.0}]}
+    left_0.5: {terrain: flat, group: flat, segments: [{command: [0.0, 0.5, 0.0], duration: 8.0}]}
+    right_0.5: {terrain: flat, group: flat, segments: [{command: [0.0, -0.5, 0.0], duration: 8.0}]}
+    yaw_left_1.5: {terrain: flat, group: flat, segments: [{command: [0.0, 0.0, 1.5], duration: 8.0}]}
+    yaw_right_1.5: {terrain: flat, group: flat, segments: [{command: [0.0, 0.0, -1.5], duration: 8.0}]}
+    arc_0.5_0.8: {terrain: flat, group: flat, segments: [{command: [0.5, 0.0, 0.8], duration: 8.0}]}
+    diagonal: {terrain: flat, group: flat, segments: [{command: [0.5, 0.3, 0.0], duration: 8.0}]}
+    turn_stop: {terrain: flat, group: flat, segments: [{command: [0.0, 0.0, 1.0], duration: 4.0}, {command: [0.0, 0.0, 0.0], duration: 4.0}]}
+    forward_2.0: {terrain: flat, group: flat, segments: [{command: [2.0, 0.0, 0.0], duration: 8.0}]}
+    backward_2.0: {terrain: flat, group: flat, segments: [{command: [-2.0, 0.0, 0.0], duration: 8.0}]}
+    go_stop_2.0: {terrain: flat, group: flat, segments: [{command: [2.0, 0.0, 0.0], duration: 4.0}, {command: [0.0, 0.0, 0.0], duration: 4.0}]}
+    arc_1.5_1.0: {terrain: flat, group: flat, segments: [{command: [1.5, 0.0, 1.0], duration: 8.0}]}
+    # phase 4: steps at 1.0 m/s
+    curbs_up_0.10: {terrain: curbs_up_0.10, group: steps, goal_distance: 3.5, segments: [{command: [1.0, 0.0, 0.0], duration: 8.0}]}
+    curbs_up_0.15: {terrain: curbs_up_0.15, group: steps, goal_distance: 3.5, segments: [{command: [1.0, 0.0, 0.0], duration: 8.0}]}
+    curbs_down_0.10: {terrain: curbs_down_0.10, group: steps, goal_distance: 3.5, segments: [{command: [1.0, 0.0, 0.0], duration: 8.0}]}
+    curbs_down_0.15: {terrain: curbs_down_0.15, group: steps, goal_distance: 3.5, segments: [{command: [1.0, 0.0, 0.0], duration: 8.0}]}
+    curbs_up_back_0.15: {terrain: curbs_up_0.15, group: steps, goal_distance: 3.5, segments: [{command: [-1.0, 0.0, 0.0], duration: 8.0}]}
+    random_grid_0.075: {terrain: random_grid_0.075, group: steps, goal_distance: 3.5, segments: [{command: [1.0, 0.0, 0.0], duration: 8.0}]}
+  criteria:
+    flat/vel_rmse: {max: 0.15}
+    flat/yaw_rate_rmse: {max: 0.2}
+    flat/fall_rate: {max: 0.01}
+    flat/standstill_speed: {max: 0.05}
+    flat/roll_pitch_rms: {max: 0.05}
+    steps/success_rate: {min: 0.8} # plan section 12: step traversal rate > 80 %
+  selection_weights: # lower is better
+    flat/vel_rmse: 1.0
+    flat/yaw_rate_rmse: 0.5
+    flat/fall_rate: 10.0
+    flat/standstill_speed: 1.0
+    flat/roll_pitch_rms: 1.0
+    flat/cost_of_transport: 0.05
+    steps/success_rate: -1.0 # 10 % more successes = 0.1 of score

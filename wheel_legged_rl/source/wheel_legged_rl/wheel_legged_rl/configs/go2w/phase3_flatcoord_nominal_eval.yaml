@@ -1,0 +1,29 @@
+# Phase 3 task under the Phase 2 model conditions (evaluation only, not for training):
+#   ./docker/wl.sh evaluate.py --task WL-Go2W-Phase3-FlatCoord-Play-v0 --load_run <phase3 run> \
+#       --env_config source/wheel_legged_rl/wheel_legged_rl/configs/go2w/phase3_flatcoord_nominal_eval.yaml ...
+#
+# Same scenarios and criteria as phase3_flatcoord.yaml, but the robot is randomised exactly as in Phase 2
+# (friction 0.8 / 0.6, base mass +-1 kg, no command delay, nominal Kp / Kd / strength / inertia / CoM / joint
+# friction). Separates forgetting from the effect of the randomisation when comparing with the Phase 2 evaluation.
+# The critic keeps its privileged inputs (they read as the nominal values), so Phase 3 checkpoints load unchanged.
+_base_: phase3_flatcoord.yaml
+
+actuators:
+  hip_thigh: {min_delay: 0, max_delay: 0}
+  calf: {min_delay: 0, max_delay: 0}
+  wheel: {min_delay: 0, max_delay: 0}
+
+events:
+  physics_material:
+    params:
+      static_friction_range: [0.8, 0.8]
+      dynamic_friction_range: [0.6, 0.6]
+  add_base_mass:
+    params:
+      mass_distribution_params: [-1.0, 1.0]
+  link_mass: null
+  base_inertia: null
+  base_com: null
+  actuator_gains: null
+  motor_strength: null
+  joint_friction: null

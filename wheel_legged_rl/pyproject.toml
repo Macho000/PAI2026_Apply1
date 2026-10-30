@@ -1,0 +1,17 @@
+# Tooling for the wheel_legged_rl project (the installable package lives in source/wheel_legged_rl).
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning:torch.*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["third_party"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E731"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["wheel_legged_rl"]
+known-third-party = ["isaaclab", "isaaclab_rl", "isaaclab_tasks", "rsl_rl"]

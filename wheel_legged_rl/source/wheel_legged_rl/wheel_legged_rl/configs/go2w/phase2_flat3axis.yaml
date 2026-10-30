@@ -1,0 +1,139 @@
+# Phase 2 -- flat ground, 3-axis velocity commands (vx, vy, yaw rate).
+#
+# Fine-tuned from a Phase 1 checkpoint (train.py --checkpoint <phase1>/model_XXXX.pt, or --init_from):
+#   vx already covers +-1 m/s, so its range starts at the limit (keeps the Phase 1 distribution -> no forgetting);
+#   vy and yaw rate start narrow and grow with the tracking curricula (Curriculum/{lin_vel_y,ang_vel_z}_levels/range).
+# No stand gate: the Phase 1 policy already stands still.
+#
+# Note: the wheels cannot roll sideways (spin axis +y), so vy has to come from the legs (stepping or crabbing).
+# Watch Metrics/base_velocity/error_vel_xy and Curriculum/lin_vel_y_levels/range; if vy does not grow, lower
+# limit_ranges.lin_vel_y rather than the tracking threshold.
+#
+# Every reward weight lives in this file. Reward terms that are not listed are disabled (weight 0, pruned).
+# Keys other than rewards / terrain / actuators / evaluation are attribute overrides on the env config
+# (envs/base_env_cfg.py). Hydra overrides from the command line are applied afterwards, e.g.
+#   train.py --task WL-Go2W-Phase2-Flat3Axis-v0 env.rewards.undesired_contacts.weight=-2.0
+
+episode_length_s: 20.0
+
+scene:
+  num_envs: 4096
+
+commands:
+  base_velocity:
+    resampling_time_range: [10.0, 10.0]
+    rel_standing_envs: 0.2 # 20 % of the envs are commanded to stand still
+    ranges: # initial sampling range; vy / yaw rate grown by the curriculum
+      lin_vel_x: [-1.0, 1.0]
+      lin_vel_y: [-0.1, 0.1]
+      ang_vel_z: [-0.3, 0.3]
+    limit_ranges: # final range; also the joystick clamp written to deploy.yaml
+      lin_vel_x: [-1.0, 1.0]
+      lin_vel_y: [-0.5, 0.5]
+      ang_vel_z: [-1.5, 1.5]
+
+rewards:
+  track_lin_vel_xy: {weight: 1.5, params: {std: 0.5}}
+  track_ang_vel_z: {weight: 0.75, params: {std: 0.5}}
+  flat_orientation: -2.5
+  lin_vel_z: -2.0
+  ang_vel_xy: -0.05
+  termination: -10.0
+  stand_still: {weight: -0.5, params: {command_threshold: 0.0277}} # ||[vx, vy, wz]|| below 0.1 km/h
+  base_height: -30.0
+  # added in phase 2 (plan section 9)
+  action_rate: -0.01 # same as phase 1; raise only if yaw / lateral motion gets jittery
+  joint_pos_limits_legs: -10.0 # soft limits of the URDF; ~0 for the phase 1 gait, guards the new lateral gaits
+  undesired_contacts: -1.0 # base / head / hip / thigh touching the ground or the other legs
+  # enabled in later phases:
+  # mech_power_legs, mech_power_wheels, joint_torques_legs, wheel_slip   (phase 3)
+
+terminations:
+  bad_orientation:
+    params: {limit_angle: 0.8}
+
+curriculum:
+  lin_vel_x_levels: null # already at the limit
+  lin_vel_y_levels:
+    params:
+      threshold: 0.8
+      delta: 0.05 # 8 checks (one per episode length, ~42 iterations) from +-0.1 to +-0.5
+  ang_vel_z_levels:
+    params:
+      threshold: 0.8
+      delta: 0.1 # 12 checks from +-0.3 to +-1.5
+  terrain_levels: null
+
+terrain:
+  generator:
+    size: [8.0, 8.0]
+    border_width: 20.0
+    num_rows: 5
+    num_cols: 5
+    curriculum: false
+  max_init_terrain_level: 0
+  friction: {static: 1.0, dynamic: 1.0}
+  sub_terrains:
+    flat: {type: flat, proportion: 1.0}
+
+observations:
+  policy:
+    terrain_height_scan:
+      noise: {n_min: -0.02, n_max: 0.02}
+  critic: # privileged domain-randomisation values: phase 3 on (the model is not randomised here)
+    wheel_friction: null
+    base_inertial: null
+    kp_scale: null
+    kd_scale: null
+    motor_strength: null
+    joint_friction: null
+    command_delay: null
+
+events:
+  physics_material: # friction randomisation starts in phase 3
+    params:
+      static_friction_range: [0.8, 0.8]
+      dynamic_friction_range: [0.6, 0.6]
+  add_base_mass:
+    params:
+      mass_distribution_params: [-1.0, 1.0]
+  push_robot:
+    interval_range_s: [10.0, 15.0]
+    params:
+      velocity_range: {x: [-0.5, 0.5], y: [-0.5, 0.5]}
+  # sim-to-real randomisation of the model (enabled in phase 3; actuator delay stays 0 without an actuators section)
+  link_mass: null
+  base_inertia: null
+  base_com: null
+  actuator_gains: null
+  motor_strength: null
+  joint_friction: null
+
+# Used by scripts/evaluate.py (not by the environment).
+evaluation:
+  num_envs: 64
+  skip_s: 1.0 # seconds after each command change excluded from tracking errors
+  scenarios:
+    # phase 1 scenarios (forgetting check)
+    stand: [{command: [0.0, 0.0, 0.0], duration: 8.0}]
+    forward_1.0: [{command: [1.0, 0.0, 0.0], duration: 8.0}]
+    backward_1.0: [{command: [-1.0, 0.0, 0.0], duration: 8.0}]
+    go_stop: [{command: [1.0, 0.0, 0.0], duration: 4.0}, {command: [0.0, 0.0, 0.0], duration: 4.0}]
+    # phase 2
+    left_0.5: [{command: [0.0, 0.5, 0.0], duration: 8.0}]
+    right_0.5: [{command: [0.0, -0.5, 0.0], duration: 8.0}]
+    yaw_left_1.5: [{command: [0.0, 0.0, 1.5], duration: 8.0}]
+    yaw_right_1.5: [{command: [0.0, 0.0, -1.5], duration: 8.0}]
+    arc_0.5_0.8: [{command: [0.5, 0.0, 0.8], duration: 8.0}]
+    diagonal: [{command: [0.5, 0.3, 0.0], duration: 8.0}]
+    turn_stop: [{command: [0.0, 0.0, 1.0], duration: 4.0}, {command: [0.0, 0.0, 0.0], duration: 4.0}]
+  criteria: # phase completion ("3-axis RMSE thresholds", plan section 12)
+    vel_rmse: {max: 0.15} # planar ||v_xy - cmd_xy||
+    yaw_rate_rmse: {max: 0.2}
+    fall_rate: {max: 0.01}
+    standstill_speed: {max: 0.05}
+  selection_weights: # best checkpoint = argmin sum(weight * metric)
+    vel_rmse: 1.0
+    yaw_rate_rmse: 0.5
+    fall_rate: 10.0
+    standstill_speed: 1.0

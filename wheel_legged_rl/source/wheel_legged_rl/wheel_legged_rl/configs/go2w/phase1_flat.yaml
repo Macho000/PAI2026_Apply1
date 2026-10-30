@@ -1,0 +1,132 @@
+# Phase 1 -- flat ground: stand still, drive forward, drive backward.
+#
+# Two-stage curriculum (curriculum.lin_vel_x_levels.params.stand_gate):
+#   stage 1 "stand": every command is below 0.1 km/h (|vx| <= 0.027 m/s) -> stand_still + base_height are learnt;
+#   stage 2 "drive": once the gate passes, the vx range grows by `delta` per check toward limit_ranges.
+# Progress is logged as Curriculum/lin_vel_x_levels/{stand_stage,range,time_out_ratio,<term>_cost}.
+#
+# Every reward weight lives in this file. Reward terms that are not listed are disabled (weight 0, pruned).
+# Keys other than rewards / terrain / actuators / evaluation are attribute overrides on the env config
+# (envs/base_env_cfg.py), e.g. `commands.base_velocity.rel_standing_envs`.
+# Hydra overrides from the command line are applied afterwards, e.g.
+#   train.py --task WL-Go2W-Phase1-Flat-v0 env.rewards.action_rate.weight=-0.01
+
+episode_length_s: 20.0
+
+scene:
+  num_envs: 4096
+
+commands:
+  base_velocity:
+    resampling_time_range: [10.0, 10.0]
+    rel_standing_envs: 0.2  # 20 % of the envs are commanded to stand still
+    ranges: # initial sampling range = stand stage (< 0.1 km/h = 0.0278 m/s); grown by the curriculum
+      lin_vel_x: [-0.027, 0.027]
+      lin_vel_y: [0.0, 0.0]
+      ang_vel_z: [0.0, 0.0]
+    limit_ranges: # final range; also the joystick clamp written to deploy.yaml
+      lin_vel_x: [-1.0, 1.0]
+      lin_vel_y: [0.0, 0.0]
+      ang_vel_z: [0.0, 0.0]
+
+rewards:
+  track_lin_vel_xy: {weight: 1.5, params: {std: 0.5}}
+  track_ang_vel_z: {weight: 0.75, params: {std: 0.5}} # command is 0 -> "do not turn"
+  flat_orientation: -2.5
+  lin_vel_z: -2.0
+  ang_vel_xy: -0.05
+  termination: -10.0
+  # active only for commands below 0.1 km/h (= the whole stand stage, then the rel_standing_envs + tiny commands)
+  stand_still: {weight: -0.5, params: {command_threshold: 0.0277}}
+  base_height: -30.0 # (h - 0.408 m)^2; keeps the body from sinking, in both stages
+  action_rate: -0.01 # weak; without it nothing penalised jitter and action_rate grew ~1000x
+  # enabled in later phases:
+  # joint_pos_limits_legs, undesired_contacts   (phase 2)
+  # mech_power_legs, mech_power_wheels, joint_torques_legs, wheel_slip   (phase 3)
+
+terminations:
+  bad_orientation:
+    params: {limit_angle: 0.8}
+
+curriculum:
+  lin_vel_x_levels:
+    params:
+      threshold: 0.8
+      delta: 0.05 # 0.1 widened the range too fast: 2-8 % falls at +-1 m/s
+      stand_gate: # stand stage -> drive stage (checked once per episode length, on all episodes since last check)
+        min_time_out_ratio: 0.95 # <= 5 % falls
+        max_cost: # mean raw per-step value
+          stand_still: 0.5 # sum |q_leg - q_default| [rad] + 0.05 sum |w_wheel| [rad/s]
+          base_height: 0.001 # (h - target)^2 [m^2] -> ~3 cm RMS
+        consecutive: 3
+  lin_vel_y_levels: null
+  ang_vel_z_levels: null
+  terrain_levels: null
+
+terrain:
+  generator:
+    size: [8.0, 8.0]
+    border_width: 20.0
+    num_rows: 5
+    num_cols: 5
+    curriculum: false
+  max_init_terrain_level: 0
+  friction: {static: 1.0, dynamic: 1.0}
+  sub_terrains:
+    flat: {type: flat, proportion: 1.0}
+
+observations:
+  policy:
+    terrain_height_scan:
+      noise: {n_min: -0.02, n_max: 0.02}
+  critic: # privileged domain-randomisation values: phase 3 on (the model is not randomised here)
+    wheel_friction: null
+    base_inertial: null
+    kp_scale: null
+    kd_scale: null
+    motor_strength: null
+    joint_friction: null
+    command_delay: null
+
+events:
+  physics_material: # friction randomisation starts in phase 3
+    params:
+      static_friction_range: [0.8, 0.8]
+      dynamic_friction_range: [0.6, 0.6]
+  add_base_mass:
+    params:
+      mass_distribution_params: [-1.0, 1.0]
+  push_robot:
+    interval_range_s: [10.0, 15.0]
+    params:
+      velocity_range: {x: [-0.5, 0.5], y: [-0.5, 0.5]}
+  # sim-to-real randomisation of the model (enabled in phase 3; actuator delay stays 0 without an actuators section)
+  link_mass: null
+  base_inertia: null
+  base_com: null
+  actuator_gains: null
+  motor_strength: null
+  joint_friction: null
+
+# actuators:            # per-group overrides of the actuator config, e.g. command delay
+#   hip_thigh: {min_delay: 0, max_delay: 2}
+
+# Used by scripts/evaluate.py (not by the environment).
+evaluation:
+  num_envs: 64
+  skip_s: 1.0 # seconds after each command change excluded from tracking errors
+  scenarios:
+    stand: [{command: [0.0, 0.0, 0.0], duration: 8.0}]
+    forward_0.5: [{command: [0.5, 0.0, 0.0], duration: 8.0}]
+    forward_1.0: [{command: [1.0, 0.0, 0.0], duration: 8.0}]
+    backward_0.5: [{command: [-0.5, 0.0, 0.0], duration: 8.0}]
+    backward_1.0: [{command: [-1.0, 0.0, 0.0], duration: 8.0}]
+    go_stop: [{command: [1.0, 0.0, 0.0], duration: 4.0}, {command: [0.0, 0.0, 0.0], duration: 4.0}]
+  criteria: # phase completion
+    vx_rmse: {max: 0.15}
+    fall_rate: {max: 0.01}
+    standstill_speed: {max: 0.05}
+  selection_weights: # best checkpoint = argmin sum(weight * metric)
+    vx_rmse: 1.0
+    fall_rate: 10.0
+    standstill_speed: 1.0
